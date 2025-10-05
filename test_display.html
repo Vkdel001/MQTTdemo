@@ -1,0 +1,68 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>QR Display Test</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; }
+        .test-section { margin: 20px 0; padding: 15px; border: 1px solid #ddd; }
+        button { padding: 10px 20px; margin: 5px; }
+        #status { margin: 10px 0; padding: 10px; background: #f0f0f0; }
+    </style>
+</head>
+<body>
+    <h1>QR Display System Test</h1>
+    
+    <div class="test-section">
+        <h3>Template Test</h3>
+        <p>Open <a href="/display" target="_blank">/display</a> to test the mobile interface</p>
+    </div>
+    
+    <div class="test-section">
+        <h3>API Test</h3>
+        <button onclick="testCurrentQR()">Test Current QR</button>
+        <button onclick="testSSEStatus()">Test SSE Status</button>
+        <button onclick="testPublishQR()">Test Publish QR (₹100)</button>
+        <div id="status"></div>
+    </div>
+    
+    <script>
+        function updateStatus(message) {
+            document.getElementById('status').innerHTML = message;
+        }
+        
+        async function testCurrentQR() {
+            try {
+                const response = await fetch('/current_qr');
+                const data = await response.json();
+                updateStatus('Current QR: ' + JSON.stringify(data, null, 2));
+            } catch (error) {
+                updateStatus('Error: ' + error.message);
+            }
+        }
+        
+        async function testSSEStatus() {
+            try {
+                const response = await fetch('/sse_status');
+                const data = await response.json();
+                updateStatus('SSE Status: ' + JSON.stringify(data, null, 2));
+            } catch (error) {
+                updateStatus('Error: ' + error.message);
+            }
+        }
+        
+        async function testPublishQR() {
+            try {
+                const response = await fetch('/publish_qr', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ amount: 100 })
+                });
+                const data = await response.json();
+                updateStatus('Publish Result: ' + JSON.stringify(data, null, 2));
+            } catch (error) {
+                updateStatus('Error: ' + error.message);
+            }
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,583 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>QR Payment Display</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            touch-action: none;
+        }
+
+        .container {
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+            text-align: center;
+        }
+
+        .header {
+            margin-bottom: 30px;
+        }
+
+        .header h1 {
+            font-size: 2.5rem;
+            font-weight: 300;
+            margin-bottom: 10px;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        }
+
+        .amount-display {
+            font-size: 3rem;
+            font-weight: bold;
+            color: #FFD700;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+            margin-bottom: 20px;
+            display: none;
+        }
+
+        .qr-container {
+            background: white;
+            border-radius: 20px;
+            padding: 30px;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+            margin-bottom: 30px;
+            min-width: 300px;
+            min-height: 300px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        #qr-canvas {
+            max-width: 100%;
+            max-height: 100%;
+        }
+
+        .waiting-message {
+            color: #666;
+            font-size: 1.5rem;
+            font-weight: 300;
+        }
+
+        .status-bar {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            background: rgba(0,0,0,0.8);
+            color: white;
+            padding: 10px;
+            font-size: 0.9rem;
+            text-align: center;
+            z-index: 1000;
+        }
+
+        .connection-status {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        .connected {
+            background: #4CAF50;
+            animation: pulse 2s infinite;
+        }
+
+        .disconnected {
+            background: #f44336;
+        }
+
+        .connecting {
+            background: #ff9800;
+            animation: blink 1s infinite;
+        }
+
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+
+        @keyframes blink {
+            0%, 50% { opacity: 1; }
+            51%, 100% { opacity: 0; }
+        }
+
+        .footer {
+            position: fixed;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            font-size: 0.9rem;
+            opacity: 0.7;
+        }
+
+        .error-message {
+            background: rgba(244, 67, 54, 0.9);
+            color: white;
+            padding: 15px;
+            border-radius: 10px;
+            margin: 20px;
+            display: none;
+        }
+
+        /* Responsive design */
+        @media (max-width: 480px) {
+            .header h1 {
+                font-size: 2rem;
+            }
+            
+            .amount-display {
+                font-size: 2.5rem;
+            }
+            
+            .qr-container {
+                padding: 20px;
+                min-width: 250px;
+                min-height: 250px;
+            }
+        }
+
+        @media (max-height: 600px) {
+            .header {
+                margin-bottom: 15px;
+            }
+            
+            .qr-container {
+                margin-bottom: 15px;
+            }
+        }
+
+        /* Landscape orientation */
+        @media (orientation: landscape) and (max-height: 500px) {
+            .container {
+                flex-direction: row;
+                justify-content: space-around;
+            }
+            
+            .header {
+                margin-bottom: 0;
+                margin-right: 20px;
+            }
+            
+            .qr-container {
+                margin-bottom: 0;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="status-bar">
+        <span class="connection-status disconnected" id="connectionStatus"></span>
+        <span id="statusText">Connecting...</span>
+    </div>
+
+    <div class="container">
+        <div class="header">
+            <h1>Payment QR Code</h1>
+            <div class="amount-display" id="amountDisplay">₹0.00</div>
+        </div>
+
+        <div class="qr-container" id="qrContainer">
+            <div class="waiting-message" id="waitingMessage">
+                Waiting for QR code...
+            </div>
+            <canvas id="qrCanvas" style="display: none;"></canvas>
+        </div>
+
+        <div class="error-message" id="errorMessage"></div>
+    </div>
+
+    <div class="footer">
+        Scan QR code with your payment app
+    </div>
+
+    <!-- QR Code generation library - using alternative CDN -->
+    <script src="https://unpkg.com/qrcode@1.5.3/build/qrcode.min.js"></script>
+    
+    <script>
+        // Global variables
+        let eventSource = null;
+        let reconnectAttempts = 0;
+        let maxReconnectAttempts = 10;
+        let reconnectDelay = 1000; // Start with 1 second
+        let isConnected = false;
+        
+        console.log('QR Display interface loaded');
+        
+        // Connection status management
+        function updateConnectionStatus(status) {
+            const statusElement = document.getElementById('connectionStatus');
+            const statusText = document.getElementById('statusText');
+            
+            statusElement.className = `connection-status ${status}`;
+            
+            switch(status) {
+                case 'connected':
+                    statusText.textContent = 'Connected';
+                    isConnected = true;
+                    reconnectAttempts = 0;
+                    reconnectDelay = 1000;
+                    break;
+                case 'connecting':
+                    statusText.textContent = 'Connecting...';
+                    isConnected = false;
+                    break;
+                case 'disconnected':
+                    statusText.textContent = 'Disconnected - Retrying...';
+                    isConnected = false;
+                    break;
+            }
+        }
+        
+        // Error handling
+        function showError(message) {
+            const errorElement = document.getElementById('errorMessage');
+            errorElement.textContent = message;
+            errorElement.style.display = 'block';
+            
+            setTimeout(() => {
+                errorElement.style.display = 'none';
+            }, 5000);
+            
+            console.error('QR Display Error:', message);
+        }
+        
+        // QR Code generation and display
+        function updateQRCode(qrData, amount) {
+            const canvas = document.getElementById('qrCanvas');
+            const waitingMessage = document.getElementById('waitingMessage');
+            const amountDisplay = document.getElementById('amountDisplay');
+            const qrContainer = document.getElementById('qrContainer');
+            
+            try {
+                if (qrData) {
+                    // Hide waiting message
+                    waitingMessage.style.display = 'none';
+                    
+                    // Show and update amount
+                    if (amount) {
+                        amountDisplay.textContent = `MUR ${parseFloat(amount).toFixed(2)}`;
+                        amountDisplay.style.display = 'block';
+                    }
+                    
+                    // Try client-side QR generation first
+                    if (typeof QRCode !== 'undefined') {
+                        generateClientSideQR(canvas, qrData);
+                    } else {
+                        // Fallback to server-side QR generation
+                        generateServerSideQR(qrContainer, qrData);
+                    }
+                } else {
+                    showWaitingState();
+                }
+            } catch (error) {
+                console.error('QR Update Error:', error);
+                showError('Error updating QR code');
+                showWaitingState();
+            }
+        }
+        
+        function generateClientSideQR(canvas, qrData) {
+            QRCode.toCanvas(canvas, qrData, {
+                width: 280,
+                height: 280,
+                margin: 2,
+                color: {
+                    dark: '#000000',
+                    light: '#FFFFFF'
+                },
+                errorCorrectionLevel: 'M'
+            }, function (error) {
+                if (error) {
+                    console.error('Client-side QR Generation Error:', error);
+                    // Fallback to server-side
+                    generateServerSideQR(canvas.parentElement, qrData);
+                } else {
+                    canvas.style.display = 'block';
+                    console.log('Client-side QR Code generated successfully');
+                }
+            });
+        }
+        
+        function generateServerSideQR(container, qrData) {
+            console.log('Using server-side QR generation');
+            
+            // Remove existing QR elements
+            const existingImg = container.querySelector('.qr-image');
+            if (existingImg) {
+                existingImg.remove();
+            }
+            
+            // Create image element for server-generated QR
+            const img = document.createElement('img');
+            img.className = 'qr-image';
+            img.style.maxWidth = '280px';
+            img.style.maxHeight = '280px';
+            img.style.display = 'block';
+            
+            // Set image source to server QR endpoint
+            img.src = `/qr-image?data=${encodeURIComponent(qrData)}`;
+            
+            img.onload = function() {
+                console.log('Server-side QR Code loaded successfully');
+            };
+            
+            img.onerror = function() {
+                console.error('Server-side QR Generation failed');
+                showError('Failed to generate QR code');
+                showWaitingState();
+            };
+            
+            container.appendChild(img);
+        }
+        
+        // Show waiting state
+        function showWaitingState() {
+            const canvas = document.getElementById('qrCanvas');
+            const waitingMessage = document.getElementById('waitingMessage');
+            const amountDisplay = document.getElementById('amountDisplay');
+            
+            canvas.style.display = 'none';
+            waitingMessage.style.display = 'block';
+            amountDisplay.style.display = 'none';
+        }
+        
+        // EventSource connection management
+        function connectToSSE() {
+            if (eventSource) {
+                eventSource.close();
+            }
+            
+            updateConnectionStatus('connecting');
+            
+            try {
+                // Add cache-busting parameter for mobile browsers
+                const timestamp = new Date().getTime();
+                eventSource = new EventSource(`/qr-stream?t=${timestamp}`);
+                
+                eventSource.onopen = function(event) {
+                    console.log('SSE connection opened');
+                    updateConnectionStatus('connected');
+                };
+                
+                eventSource.onmessage = function(event) {
+                    try {
+                        const data = JSON.parse(event.data);
+                        handleSSEMessage(data);
+                    } catch (error) {
+                        console.error('Error parsing SSE message:', error);
+                        showError('Invalid message received');
+                    }
+                };
+                
+                eventSource.onerror = function(event) {
+                    console.error('SSE connection error:', event);
+                    console.log('EventSource readyState:', eventSource.readyState);
+                    updateConnectionStatus('disconnected');
+                    
+                    // Always try to reconnect on mobile
+                    setTimeout(() => {
+                        if (eventSource.readyState === EventSource.CLOSED || 
+                            eventSource.readyState === EventSource.CONNECTING) {
+                            scheduleReconnect();
+                        }
+                    }, 1000);
+                };
+                
+            } catch (error) {
+                console.error('Failed to create EventSource:', error);
+                showError('Failed to connect to server');
+                scheduleReconnect();
+            }
+        }
+        
+        // Handle different types of SSE messages
+        function handleSSEMessage(data) {
+            console.log('SSE Message received:', data.type);
+            
+            switch (data.type) {
+                case 'connected':
+                    console.log('Connected to QR stream:', data.client_id);
+                    updateConnectionStatus('connected');
+                    break;
+                    
+                case 'qr_update':
+                    console.log('QR Update received:', {
+                        amount: data.amount,
+                        dataLength: data.qr_data?.length,
+                        timestamp: data.timestamp
+                    });
+                    updateQRCode(data.qr_data, data.amount);
+                    break;
+                    
+                case 'heartbeat':
+                    // Silent heartbeat - just update connection status
+                    if (!isConnected) {
+                        updateConnectionStatus('connected');
+                    }
+                    break;
+                    
+                case 'error':
+                    showError(data.message || 'Server error occurred');
+                    if (data.retry_after) {
+                        setTimeout(connectToSSE, data.retry_after);
+                    }
+                    break;
+                    
+                default:
+                    console.log('Unknown message type:', data.type);
+            }
+        }
+        
+        // Reconnection with exponential backoff
+        function scheduleReconnect() {
+            if (reconnectAttempts >= maxReconnectAttempts) {
+                showError('Connection failed. Please refresh the page.');
+                return;
+            }
+            
+            reconnectAttempts++;
+            const delay = Math.min(reconnectDelay * Math.pow(2, reconnectAttempts - 1), 30000);
+            
+            console.log(`Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${maxReconnectAttempts})`);
+            
+            setTimeout(() => {
+                if (!isConnected) {
+                    connectToSSE();
+                }
+            }, delay);
+        }
+        
+        // Feature detection and fallback
+        function checkBrowserSupport() {
+            if (typeof EventSource === 'undefined') {
+                showError('Your browser does not support real-time updates. Please use a modern browser.');
+                return false;
+            }
+            
+            if (typeof QRCode === 'undefined') {
+                console.warn('QR code library not loaded, will use server-side generation');
+                // Don't return false - we have server-side fallback
+            }
+            
+            return true;
+        }
+        
+        // Page visibility handling
+        function handleVisibilityChange() {
+            if (document.hidden) {
+                // On mobile, don't close connection immediately
+                // Mobile browsers often trigger this when switching apps
+                console.log('Page hidden - keeping connection for mobile compatibility');
+            } else {
+                // Page is visible again, ensure connection
+                console.log('Page visible - checking connection');
+                if (!isConnected || !eventSource || eventSource.readyState !== EventSource.OPEN) {
+                    setTimeout(connectToSSE, 500);
+                }
+            }
+        }
+        
+        // Mobile-specific connection handling
+        function handleMobileConnection() {
+            // Detect if we're on mobile
+            const isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+            
+            if (isMobile) {
+                console.log('Mobile device detected - using mobile-optimized settings');
+                
+                // Handle mobile browser sleep/wake
+                window.addEventListener('focus', function() {
+                    console.log('Window focused - reconnecting if needed');
+                    if (!isConnected) {
+                        setTimeout(connectToSSE, 1000);
+                    }
+                });
+                
+                // Handle mobile network changes
+                window.addEventListener('online', function() {
+                    console.log('Network online - reconnecting');
+                    setTimeout(connectToSSE, 2000);
+                });
+                
+                window.addEventListener('offline', function() {
+                    console.log('Network offline');
+                    updateConnectionStatus('disconnected');
+                });
+            }
+        }
+        
+        // Initialize the application
+        function initialize() {
+            console.log('Initializing QR Display...');
+            console.log('User Agent:', navigator.userAgent);
+            
+            // Check browser support
+            if (!checkBrowserSupport()) {
+                return;
+            }
+            
+            // Set up mobile-specific handling
+            handleMobileConnection();
+            
+            // Set up page visibility handling
+            document.addEventListener('visibilitychange', handleVisibilityChange);
+            
+            // Handle page unload
+            window.addEventListener('beforeunload', function() {
+                if (eventSource) {
+                    eventSource.close();
+                }
+            });
+            
+            // Start connection with delay for mobile
+            updateConnectionStatus('connecting');
+            setTimeout(() => {
+                connectToSSE();
+            }, 1000);
+            
+            // Show initial waiting state
+            showWaitingState();
+        }
+        
+        // Start when page loads
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', initialize);
+        } else {
+            initialize();
+        }
+        
+        // Expose functions for debugging
+        window.qrDisplay = {
+            reconnect: connectToSSE,
+            status: () => ({ isConnected, reconnectAttempts }),
+            testQR: (data, amount) => updateQRCode(data, amount)
+        };
+    </script>
+</body>
+</html>

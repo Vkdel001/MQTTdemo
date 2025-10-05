@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>JavaScript Unit Tests</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 20px;
+        }
+
+        .test-section {
+            margin: 20px 0;
+            padding: 15px;
+            border: 1px solid #ddd;
+        }
+
+        .pass {
+            color: green;
+        }
+
+        .fail {
+            color: red;
+        }
+
+        button {
+            padding: 10px 20px;
+            margin: 5px;
+        }
+
+        #results {
+            margin: 20px 0;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>QR Display JavaScript Tests</h1>
+
+    <div class="test-section">
+        <h3>Browser Support Tests</h3>
+        <button onclick="testEventSourceSupport()">Test EventSource Support</button>
+        <button onclick="testQRCodeLibrary()">Test QR Code Library</button>
+        <div id="browserTests"></div>
+    </div>
+
+    <div class="test-section">
+        <h3>QR Code Generation Tests</h3>
+        <button onclick="testQRGeneration()">Test QR Generation</button>
+        <button onclick="testInvalidQR()">Test Invalid QR Data</button>
+        <div id="qrTests"></div>
+        <canvas id="testCanvas" width="200" height="200" style="border: 1px solid #ccc; margin: 10px;"></canvas>
+    </div>
+
+    <div class="test-section">
+        <h3>Connection Status Tests</h3>
+        <button onclick="testConnectionStates()">Test Connection States</button>
+        <div id="connectionTests"></div>
+        <div style="margin: 10px 0;">
+            Status: <span class="connection-status connected" id="testStatus"></span>
+            <span id="testStatusText">Test Status</span>
+        </div>
+    </div>
+
+    <div class="test-section">
+        <h3>Live Connection Test</h3>
+        <button onclick="testLiveConnection()">Test Live SSE Connection</button>
+        <button onclick="disconnectTest()">Disconnect Test</button>
+        <div id="liveTests"></div>
+    </div>
+
+    <div id="results"></div>
+
+    <!-- Include QR Code library -->
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+
+    <script>
+        let testResults = [];
+
+        function addResult(test, passed, message) {
+            testResults.push({ test, passed, message });
+            updateResults();
+        }
+
+        function updateResults() {
+            const resultsDiv = document.getElementById('results');
+            resultsDiv.innerHTML = '<h3>Test Results:</h3>' +
+                testResults.map(r =>
+                    `<div class="${r.passed ? 'pass' : 'fail'}">
+                        ${r.passed ? '✓' : '✗'} ${r.test}: ${r.message}
+                    </div>`
+                ).join('');
+        }
+
+        function testEventSourceSupport() {
+            const supported = typeof EventSource !== 'undefined';
+            document.getElementById('browserTests').innerHTML +=
+                `<div class="${supported ? 'pass' : 'fail'}">
+                    EventSource Support: ${supported ? 'Supported' : 'Not Supported'}
+                </div>`;
+            addResult('EventSource Support', supported, supported ? 'Browser supports SSE' : 'Browser does not support SSE');
+        }
+
+        function testQRCodeLibrary() {
+            const loaded = typeof QRCode !== 'undefined';
+            document.getElementById('browserTests').innerHTML +=
+                `<div class="${loaded ? 'pass' : 'fail'}">
+                    QR Code Library: ${loaded ? 'Loaded' : 'Not Loaded'}
+                </div>`;
+            addResult('QR Code Library', loaded, loaded ? 'QR library loaded successfully' : 'QR library failed to load');
+        }
+
+        function testQRGeneration() {
+            const canvas = document.getElementById('testCanvas');
+            const testData = 'upi://pay?pa=test@upi&pn=Test&am=100&cu=INR';
+
+            try {
+                QRCode.toCanvas(canvas, testData, {
+                    width: 200,
+                    height: 200,
+                    margin: 2
+                }, function (error) {
+                    if (error) {
+                        document.getElementById('qrTests').innerHTML +=
+                            `<div class="fail">QR Generation: Failed - ${error.message}</div>`;
+                        addResult('QR Generation', false, `Failed: ${error.message}`);
+                    } else {
+                        document.getElementById('qrTests').innerHTML +=
+                            `<div class="pass">QR Generation: Success</div>`;
+                        addResult('QR Generation', true, 'QR code generated successfully');
+                    }
+                });
+            } catch (error) {
+                document.getElementById('qrTests').innerHTML +=
+                    `<div class="fail">QR Generation: Exception - ${error.message}</div>`;
+                addResult('QR Generation', false, `Exception: ${error.message}`);
+            }
+        }
+
+        function testInvalidQR() {
+            const canvas = document.getElementById('testCanvas');
+
+            try {
+                QRCode.toCanvas(canvas, '', {
+                    width: 200,
+                    height: 200
+                }, function (error) {
+                    if (error) {
+                        document.getElementById('qrTests').innerHTML +=
+                            `<div class="pass">Invalid QR Handling: Correctly rejected empty data</div>`;
+                        addResult('Invalid QR Handling', true, 'Empty data correctly rejected');
+                    } else {
+                        document.getElementById('qrTests').innerHTML +=
+                            `<div class="fail">Invalid QR Handling: Should have failed</div>`;
+                        addResult('Invalid QR Handling', false, 'Empty data should have been rejected');
+                    }
+                });
+            } catch (error) {
+                document.getElementById('qrTests').innerHTML +=
+                    `<div class="pass">Invalid QR Handling: Exception caught - ${error.message}</div>`;
+                addResult('Invalid QR Handling', true, `Exception properly caught: ${error.message}`);
+            }
+        }
+
+        function testConnectionStates() {
+            const statusElement = document.getElementById('testStatus');
+            const statusText = document.getElementById('testStatusText');
+
+            const states = ['connecting', 'connected', 'disconnected'];
+            let currentState = 0;
+
+            function cycleStates() {
+                const state = states[currentState];
+                statusElement.className = `connection-status ${state}`;
+                statusText.textContent = state.charAt(0).toUpperCase() + state.slice(1);
+
+                currentState = (currentState + 1) % states.length;
+
+                if (currentState === 0) {
+                    document.getElementById('connectionTests').innerHTML +=
+                        `<div class="pass">Connection States: All states tested</div>`;
+                    addResult('Connection States', true, 'All connection states working');
+                    return;
+                }
+
+                setTimeout(cycleStates, 1000);
+            }
+
+            cycleStates();
+        }
+
+        let testEventSource = null;
+
+        function testLiveConnection() {
+            if (testEventSource) {
+                testEventSource.close();
+            }
+
+            try {
+                testEventSource = new EventSource('/qr-stream');
+
+                testEventSource.onopen = function () {
+                    document.getElementById('liveTests').innerHTML +=
+                        `<div class="pass">Live Connection: Connected successfully</div>`;
+                    addResult('Live SSE Connection', true, 'Successfully connected to /qr-stream');
+                };
+
+                testEventSource.onmessage = function (event) {
+                    try {
+                        const data = JSON.parse(event.data);
+                        document.getElementById('liveTests').innerHTML +=
+                            `<div class="pass">Message Received: ${data.type}</div>`;
+                        addResult('SSE Message', true, `Received ${data.type} message`);
+                    } catch (error) {
+                        document.getElementById('liveTests').innerHTML +=
+                            `<div class="fail">Message Parse Error: ${error.message}</div>`;
+                        addResult('SSE Message Parse', false, error.message);
+                    }
+                };
+
+                testEventSource.onerror = function (error) {
+                    document.getElementById('liveTests').innerHTML +=
+                        `<div class="fail">Connection Error: ${error}</div>`;
+                    addResult('SSE Connection Error', false, 'Connection failed');
+                };
+
+            } catch (error) {
+                document.getElementById('liveTests').innerHTML +=
+                    `<div class="fail">Connection Setup Error: ${error.message}</div>`;
+                addResult('SSE Setup', false, error.message);
+            }
+        }
+
+        function disconnectTest() {
+            if (testEventSource) {
+                testEventSource.close();
+                document.getElementById('liveTests').innerHTML +=
+                    `<div class="pass">Disconnect Test: Connection closed</div>`;
+                addResult('SSE Disconnect', true, 'Connection closed successfully');
+            } else {
+                document.getElementById('liveTests').innerHTML +=
+                    `<div class="fail">Disconnect Test: No connection to close</div>`;
+                addResult('SSE Disconnect', false, 'No active connection');
+            }
+        }
+
+        // Auto-run basic tests
+        window.addEventListener('load', function () {
+            setTimeout(() => {
+                testEventSourceSupport();
+                testQRCodeLibrary();
+            }, 500);
+        });
+    </script>
+
+    <style>
+        .connection-status {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        .connected {
+            background: #4CAF50;
+        }
+
+        .disconnected {
+            background: #f44336;
+        }
+
+        .connecting {
+            background: #ff9800;
+        }
+    </style>
+</body>
+
+</html>
