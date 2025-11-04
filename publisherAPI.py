@@ -15,10 +15,14 @@ CORS(app)
 
 # MQTT broker config
 BROKER = "nodered-mqtt.bonrix.in"
-PORT = 21883
-USER = "nxon"
-PASSWORD = "nxon1234"
-TOPIC = "test1"
+PORT = 31883
+USER = "bonrix"
+PASSWORD = "bonrix123456789"
+TOPIC = "F0F5BD759280"
+
+# BHIM Device config
+BHIM_DEVICE_IP = "192.168.100.73"
+BHIM_DEVICE_URL = f"http://{BHIM_DEVICE_IP}"
 
 # In-memory storage for current QR data (thread-safe)
 qr_data_lock = threading.Lock()
@@ -60,19 +64,29 @@ class SSEClient:
 def on_message(client, userdata, msg):
     """Handle incoming MQTT messages and store QR data"""
     try:
-        qr_data = msg.payload.decode()
+        payload = msg.payload.decode()
         timestamp = datetime.now().isoformat()
+        
+        # Try to parse as JSON first (new format with amount)
+        try:
+            mqtt_data = json.loads(payload)
+            qr_data = mqtt_data.get("qr_data")
+            amount = mqtt_data.get("amount")
+            print(f"📩 Received MQTT JSON: QR={len(qr_data)} chars, Amount={amount}")
+        except json.JSONDecodeError:
+            # Fallback to old format (plain QR string)
+            qr_data = payload
+            amount = current_qr_data.get("amount")  # Use stored amount as fallback
+            print(f"📩 Received MQTT plain text: {len(qr_data)} chars")
         
         # Thread-safe update of current QR data
         with qr_data_lock:
             current_qr_data["qr_data"] = qr_data
+            current_qr_data["amount"] = amount
             current_qr_data["timestamp"] = timestamp
-            # Amount will be set when publishing
         
-        print(f"📩 Received QR Data: {len(qr_data)} chars at {timestamp}")
-        
-        # Broadcast to SSE clients (will be implemented in later tasks)
-        broadcast_qr_update(qr_data, current_qr_data.get("amount"))
+        # Broadcast to SSE clients and BHIM device with correct amount
+        broadcast_qr_update(qr_data, amount)
         
     except Exception as e:
         print(f"❌ Error handling MQTT message: {e}")
@@ -90,8 +104,212 @@ def on_disconnect(client, userdata, rc):
     """Handle MQTT disconnection"""
     print(f"📡 Disconnected from MQTT broker (code: {rc})")
 
+def wake_up_bhim_device():
+    """Wake up BHIM device by putting it into Dynamic QR API mode (status=2)"""
+    try:
+        # Create a session to maintain cookies/state like browser
+        session = requests.Session()
+        
+        # Browser-like headers to mimic browser behavior
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate',
+            'Connection': 'close',  # Changed to close to avoid connection reuse issues
+            'Upgrade-Insecure-Requests': '1',
+            'Cache-Control': 'max-age=0'
+        }
+        
+        # First, try to access the main page to establish session
+        try:
+            print("🔄 Establishing session with BHIM device...")
+            main_response = session.get(
+                f"{BHIM_DEVICE_URL}/",
+                headers=headers,
+                timeout=15,
+                verify=False,  # Disable SSL verification
+                allow_redirects=True
+            )
+            print(f"📄 Main page response: {main_response.status_code}")
+        except Exception as session_e:
+            print(f"⚠️ Session establishment failed: {session_e}")
+        
+        # Now try the wake-up call with the session
+        response = session.get(
+            f"{BHIM_DEVICE_URL}/home?status=2",
+            headers=headers,
+            timeout=30,
+            verify=False,  # Disable SSL verification
+            allow_redirects=True
+        )
+        
+        # Wake-up call returns HTML page (200 status), not "ok"
+        if response.status_code == 200:
+            print("✅ BHIM device activated in Dynamic QR API mode")
+            # Give device time to fully initialize API endpoints
+            print("⏳ Waiting for device to initialize API endpoints...")
+            time.sleep(5)
+            return True
+        else:
+            print(f"⚠️ BHIM device wake-up responded with status {response.status_code}")
+            return False
+            
+    except requests.exceptions.Timeout:
+        print(f"⏰ BHIM device wake-up timeout (device might still be activating)")
+        # Even if timeout, device might still activate, so wait and return True
+        print("⏳ Waiting for device to complete initialization...")
+        time.sleep(8)
+        return True
+    except requests.exceptions.ConnectionError as ce:
+        print(f"❌ Connection error waking up BHIM device: {ce}")
+        # Try alternative approach - assume device will activate anyway
+        print("⏳ Assuming device is activating, waiting...")
+        time.sleep(10)
+        return True
+    except Exception as e:
+        print(f"❌ Error waking up BHIM device: {e}")
+        return False
+
+def send_with_auto_recovery(endpoint, params, operation_name):
+    """Send request to BHIM device with automatic recovery on 404 errors"""
+    try:
+        # Browser-like headers for API calls too
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Connection': 'keep-alive'
+        }
+        
+        response = requests.get(
+            f"{BHIM_DEVICE_URL}{endpoint}",
+            params=params,
+            headers=headers,
+            timeout=15  # Increased timeout for API calls
+        )
+        
+        # If 404 or timeout, try to wake up device and retry once
+        if response.status_code == 404:
+            print(f"🔄 BHIM device not ready (404), attempting wake-up for {operation_name}")
+            if wake_up_bhim_device():
+                # Retry the original request with longer timeout
+                print(f"🔄 Retrying {operation_name} after wake-up...")
+                response = requests.get(
+                    f"{BHIM_DEVICE_URL}{endpoint}",
+                    params=params,
+                    headers=headers,
+                    timeout=15
+                )
+        
+        if response.status_code == 200 and response.text.strip().lower() == "ok":
+            print(f"✅ {operation_name} sent to BHIM device successfully")
+            return True
+        else:
+            print(f"⚠️ BHIM device responded with status {response.status_code}, response: {response.text}")
+            return False
+            
+    except requests.exceptions.ConnectionError:
+        print(f"❌ Cannot connect to BHIM device at {BHIM_DEVICE_IP}")
+        return False
+    except requests.exceptions.Timeout:
+        print(f"⏰ Timeout connecting to BHIM device for {operation_name}")
+        # On timeout, try wake-up and retry once
+        print(f"🔄 Attempting wake-up due to timeout for {operation_name}")
+        if wake_up_bhim_device():
+            try:
+                print(f"🔄 Retrying {operation_name} after timeout wake-up...")
+                response = requests.get(
+                    f"{BHIM_DEVICE_URL}{endpoint}",
+                    params=params,
+                    headers=headers,
+                    timeout=20  # Even longer timeout for retry
+                )
+                
+                if response.status_code == 200 and response.text.strip().lower() == "ok":
+                    print(f"✅ {operation_name} sent to BHIM device successfully (after timeout recovery)")
+                    return True
+                else:
+                    print(f"⚠️ BHIM device responded with status {response.status_code} after timeout recovery")
+                    return False
+                    
+            except Exception as retry_e:
+                print(f"❌ Retry after timeout failed for {operation_name}: {retry_e}")
+                return False
+        else:
+            return False
+    except Exception as e:
+        print(f"❌ Error sending {operation_name} to BHIM device: {e}")
+        return False
+
+def send_welcome_to_bhim_device(title="Welcome to ZwennPay", img=""):
+    """Send welcome message to BHIM device"""
+    params = {
+        "img": img,
+        "title": title
+    }
+    
+    return send_with_auto_recovery("/DisplayWelcomeMessage", params, "welcome message")
+
+def send_total_to_bhim_device(total_amount, discount=0, tax=0, grand_total=None):
+    """Send total amount display to BHIM device"""
+    if grand_total is None:
+        grand_total = float(total_amount) - float(discount) + float(tax)
+    
+    params = {
+        "img": "",
+        "totalamount": str(total_amount),
+        "savingdiscount": str(discount),
+        "taxamount": str(tax),
+        "grandtotal": str(grand_total)
+    }
+    
+    return send_with_auto_recovery("/DisplayTotal", params, "total display")
+
+def send_qr_to_bhim_device(qr_data, amount=None):
+    """Send QR code to BHIM device for display using correct API endpoint"""
+    import base64
+    
+    # Convert QR data to base64 (BHIM device expects base64 encoded QR)
+    qr_base64 = base64.b64encode(qr_data.encode()).decode()
+    
+    # Prepare parameters for BHIM device API
+    params = {
+        "qrcodebase64": qr_base64,
+        "upiurl": qr_data,  # Original UPI URL
+        "amount": str(amount) if amount else "0",
+        "companyname": "ZwennPay",
+        "shopnm": "ZwennPay"
+    }
+    
+    return send_with_auto_recovery("/Displayqrcode", params, "QR code")
+
+def send_payment_status_to_bhim_device(status, order_id, bank_rrn="", date=None):
+    """Send payment status (success/cancel/fail) to BHIM device"""
+    if date is None:
+        date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    params = {
+        "orderid": str(order_id),
+        "bankrrn": str(bank_rrn),
+        "date": str(date)
+    }
+    
+    # Choose endpoint based on status
+    if status.lower() == "success":
+        endpoint = "/DisplayQRCodeSucessStatus"
+    elif status.lower() == "cancel":
+        endpoint = "/DisplayQRCodeCancelStatus"
+    elif status.lower() == "fail":
+        endpoint = "/DisplayQRCodeFailStatus"
+    else:
+        print(f"❌ Invalid status: {status}")
+        return False
+    
+    return send_with_auto_recovery(endpoint, params, f"payment status '{status}'")
+
 def broadcast_qr_update(qr_data, amount=None):
-    """Broadcast QR update to all connected SSE clients"""
+    """Broadcast QR update to all connected SSE clients and BHIM device"""
     message = {
         "type": "qr_update",
         "qr_data": qr_data,
@@ -113,6 +331,9 @@ def broadcast_qr_update(qr_data, amount=None):
             del sse_clients[client_id]
     
     print(f"📡 Broadcasted QR update to {len(sse_clients)} clients")
+    
+    # Also send to BHIM device
+    send_qr_to_bhim_device(qr_data, amount)
 
 def format_sse_message(data, event_type="message"):
     """Format data as Server-Sent Events message"""
@@ -148,7 +369,7 @@ def get_current_qr_data():
     with qr_data_lock:
         return current_qr_data.copy()
 
-# MQTT client setup with callbacks
+# MQTT client setup with callbacks (for receiving messages only)
 client = mqtt.Client()
 client.username_pw_set(USER, PASSWORD)
 client.on_connect = on_connect
@@ -156,6 +377,49 @@ client.on_message = on_message
 client.on_disconnect = on_disconnect
 client.connect(BROKER, PORT, 60)
 client.loop_start()
+
+def create_fresh_mqtt_client():
+    """Create a fresh MQTT client for publishing only (no message receiving)"""
+    fresh_client = mqtt.Client(clean_session=True)
+    fresh_client.username_pw_set(USER, PASSWORD)
+    # NO callbacks set - this client only publishes, never receives messages
+    return fresh_client
+
+def publish_with_fresh_connection(payload, timeout=10):
+    """Publish MQTT message with fresh connection to avoid session issues"""
+    fresh_client = None
+    try:
+        # Create fresh client (publish-only, no message receiving)
+        fresh_client = create_fresh_mqtt_client()
+        
+        # Connect with timeout
+        fresh_client.connect(BROKER, PORT, 60)
+        
+        # Use synchronous connection check instead of loop_start to avoid message receiving
+        start_time = time.time()
+        while not fresh_client.is_connected() and (time.time() - start_time) < timeout:
+            fresh_client.loop(timeout=0.1)  # Process network events without starting background loop
+        
+        if not fresh_client.is_connected():
+            print("❌ Fresh MQTT connection failed")
+            return False
+        
+        # Publish message
+        result = fresh_client.publish(TOPIC, payload)
+        
+        # Process the publish without starting background loop
+        fresh_client.loop(timeout=0.5)
+        
+        print("✅ Published with fresh MQTT connection")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Fresh MQTT publish error: {e}")
+        return False
+    finally:
+        # Clean up fresh client
+        if fresh_client:
+            fresh_client.disconnect()
 
 # Background thread for periodic cleanup
 def background_cleanup():
@@ -169,79 +433,56 @@ cleanup_thread.start()
 
 @app.route("/publish_qr", methods=["POST"])
 def publish_qr():
+    data = request.json
+    amount = data.get("amount")
+    if amount is None:
+        return jsonify({"error": "Amount not provided"}), 400
+
+    # Store amount for QR data context
+    with qr_data_lock:
+        current_qr_data["amount"] = str(amount)
+
+    # Generate QR from API
+    payload = {
+        "MerchantId": 57,
+        "SetTransactionAmount": True,
+        "TransactionAmount": str(amount),
+        "SetConvenienceIndicatorTip": False,
+        "ConvenienceIndicatorTip": 0,
+        "SetConvenienceFeeFixed": False,
+        "ConvenienceFeeFixed": 0,
+        "SetConvenienceFeePercentage": False,
+        "ConvenienceFeePercentage": 0,
+    }
+
     try:
-        print("🔄 Received QR generation request")
-        data = request.json
-        print(f"📊 Request data: {data}")
-        
-        amount = data.get("amount")
-        if amount is None:
-            print("❌ Amount not provided in request")
-            return jsonify({"error": "Amount not provided"}), 400
-
-        print(f"💰 Processing amount: MUR {amount}")
-
-        # Store amount for QR data context
-        with qr_data_lock:
-            current_qr_data["amount"] = str(amount)
-
-        # Generate QR from API
-        payload = {
-            "MerchantId": 57,
-            "SetTransactionAmount": True,
-            "TransactionAmount": str(amount),
-            "SetConvenienceIndicatorTip": False,
-            "ConvenienceIndicatorTip": 0,
-            "SetConvenienceFeeFixed": False,
-            "ConvenienceFeeFixed": 0,
-            "SetConvenienceFeePercentage": False,
-            "ConvenienceFeePercentage": 0,
-        }
-
-        print("🌐 Calling ZwennPay API...")
         response = requests.post(
-            "https://apiuat.zwennpay.com:9425/api/v1.0/Common/GetMerchantQR",
+            "https://api.zwennpay.com:9425/api/v1.0/Common/GetMerchantQR",
             headers={"accept": "text/plain", "Content-Type": "application/json"},
             json=payload,
-            timeout=15  # Reasonable timeout
+            timeout=20
         )
-        
-        print(f"📡 API Response Status: {response.status_code}")
         response.raise_for_status()
         qr_data = response.text.strip()
-        print(f"✅ QR Data received: {len(qr_data)} characters")
         
-        # Publish to MQTT (this will trigger our on_message callback)
-        print("📤 Publishing to MQTT...")
-        client.publish(TOPIC, qr_data)
-        print("✅ MQTT publish successful")
-        
-        return jsonify({
-            "status": "success", 
+        # Create MQTT payload with QR data and amount
+        mqtt_payload = {
             "qr_data": qr_data,
-            "amount": amount,
-            "message": "QR code generated successfully"
-        })
+            "amount": str(amount),
+            "timestamp": datetime.now().isoformat()
+        }
         
-    except requests.exceptions.Timeout:
-        error_msg = "QR API request timed out. Please try again."
-        print(f"⏰ {error_msg}")
-        return jsonify({"error": error_msg}), 408
+        # Publish with fresh connection to avoid BHIM device restart issues
+        publish_success = publish_with_fresh_connection(json.dumps(mqtt_payload))
         
-    except requests.exceptions.ConnectionError:
-        error_msg = "Unable to connect to QR API. Please check internet connection."
-        print(f"🌐 {error_msg}")
-        return jsonify({"error": error_msg}), 503
+        if not publish_success:
+            print("⚠️ Fresh MQTT publish failed, trying persistent connection")
+            # Fallback to persistent connection
+            client.publish(TOPIC, json.dumps(mqtt_payload))
         
-    except requests.exceptions.HTTPError as e:
-        error_msg = f"QR API returned error: {e.response.status_code}"
-        print(f"🚫 {error_msg}")
-        return jsonify({"error": error_msg}), 502
-        
+        return jsonify({"status": "success", "qr_data": qr_data})
     except Exception as e:
-        error_msg = f"Unexpected error: {str(e)}"
-        print(f"❌ {error_msg}")
-        return jsonify({"error": error_msg}), 500
+        return jsonify({"error": str(e)}), 500
 
 @app.route("/qr-stream")
 def qr_stream():
@@ -405,14 +646,113 @@ def mobile_test():
         "timestamp": datetime.now().isoformat()
     })
 
-@app.route("/health")
-def health_check():
-    """Health check endpoint"""
+@app.route("/test-bhim", methods=["POST"])
+def test_bhim_device():
+    """Test connectivity and QR display on BHIM device"""
+    data = request.json or {}
+    test_qr = data.get("qr_data", "upi://pay?pa=test@paytm&pn=Test&am=100&cu=MUR")
+    test_amount = data.get("amount", "100")
+    
+    success = send_qr_to_bhim_device(test_qr, test_amount)
+    
     return jsonify({
-        "status": "healthy",
-        "service": "Artemis Hospital Billing System",
-        "timestamp": datetime.now().isoformat(),
-        "mqtt_connected": client.is_connected() if hasattr(client, 'is_connected') else "unknown"
+        "status": "success" if success else "failed",
+        "message": f"BHIM device test {'successful' if success else 'failed'}",
+        "device_ip": BHIM_DEVICE_IP,
+        "timestamp": datetime.now().isoformat()
+    })
+
+@app.route("/bhim-status", methods=["GET"])
+def bhim_device_status():
+    """Check BHIM device connectivity and status"""
+    try:
+        # Try a simple message endpoint to test connectivity
+        response = requests.get(
+            f"{BHIM_DEVICE_URL}/msg",
+            params={"img": "", "title": "Connection Test"},
+            timeout=5
+        )
+        
+        if response.status_code == 200:
+            return jsonify({
+                "status": "online",
+                "device_ip": BHIM_DEVICE_IP,
+                "response": response.text,
+                "timestamp": datetime.now().isoformat()
+            })
+        else:
+            return jsonify({
+                "status": "error",
+                "device_ip": BHIM_DEVICE_IP,
+                "error": f"Device responded with status {response.status_code}",
+                "timestamp": datetime.now().isoformat()
+            })
+            
+    except requests.exceptions.ConnectionError:
+        return jsonify({
+            "status": "offline",
+            "device_ip": BHIM_DEVICE_IP,
+            "error": "Cannot connect to device",
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "device_ip": BHIM_DEVICE_IP,
+            "error": str(e),
+            "timestamp": datetime.now().isoformat()
+        })
+
+@app.route("/bhim-welcome", methods=["POST"])
+def bhim_welcome():
+    """Send welcome message to BHIM device"""
+    data = request.json or {}
+    title = data.get("title", "Welcome to Artemis Hospital")
+    img = data.get("img", "")
+    
+    success = send_welcome_to_bhim_device(title, img)
+    
+    return jsonify({
+        "status": "success" if success else "failed",
+        "message": f"Welcome message {'sent' if success else 'failed'}",
+        "device_ip": BHIM_DEVICE_IP,
+        "timestamp": datetime.now().isoformat()
+    })
+
+@app.route("/bhim-total", methods=["POST"])
+def bhim_total():
+    """Send total amount display to BHIM device"""
+    data = request.json or {}
+    total_amount = data.get("total_amount", 0)
+    discount = data.get("discount", 0)
+    tax = data.get("tax", 0)
+    grand_total = data.get("grand_total")
+    
+    success = send_total_to_bhim_device(total_amount, discount, tax, grand_total)
+    
+    return jsonify({
+        "status": "success" if success else "failed",
+        "message": f"Total display {'sent' if success else 'failed'}",
+        "device_ip": BHIM_DEVICE_IP,
+        "timestamp": datetime.now().isoformat()
+    })
+
+@app.route("/bhim-payment-status", methods=["POST"])
+def bhim_payment_status():
+    """Send payment status to BHIM device"""
+    data = request.json or {}
+    status = data.get("status", "success")  # success, cancel, fail
+    order_id = data.get("order_id", "")
+    bank_rrn = data.get("bank_rrn", "")
+    date = data.get("date")
+    
+    success = send_payment_status_to_bhim_device(status, order_id, bank_rrn, date)
+    
+    return jsonify({
+        "status": "success" if success else "failed",
+        "message": f"Payment status '{status}' {'sent' if success else 'failed'}",
+        "device_ip": BHIM_DEVICE_IP,
+        "timestamp": datetime.now().isoformat()
     })
 
 if __name__ == "__main__":
@@ -433,11 +773,20 @@ if __name__ == "__main__":
     print(f"📡 SSE Stream: http://{local_ip}:5001/qr-stream")
     print("=" * 50)
     print(f"📲 Mobile URL: http://{local_ip}:5001/display")
+    print(f"💳 BHIM Device: http://{BHIM_DEVICE_IP}")
+    print("=" * 50)
+    print("🔧 BHIM Device API Endpoints:")
+    print(f"   - BHIM Status: GET http://{local_ip}:5001/bhim-status")
+    print(f"   - Test BHIM: POST http://{local_ip}:5001/test-bhim")
+    print(f"   - Welcome Message: POST http://{local_ip}:5001/bhim-welcome")
+    print(f"   - Display Total: POST http://{local_ip}:5001/bhim-total")
+    print(f"   - Payment Status: POST http://{local_ip}:5001/bhim-payment-status")
     print("=" * 50)
     print("🔧 Troubleshooting:")
     print("   - Ensure mobile and laptop are on same WiFi")
     print("   - Check Windows Firewall allows port 5001")
+    print("   - Ensure BHIM device is accessible at 192.168.100.73")
     print("   - Try disabling Windows Firewall temporarily")
     print("=" * 50)
     
-    app.run(host="0.0.0.0", port=5001, debug=True, threaded=True, use_reloader=False)
+    app.run(host="0.0.0.0", port=5001, debug=True, threaded=True)

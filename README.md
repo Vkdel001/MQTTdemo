@@ -58,12 +58,12 @@ The POS terminal opens at `http://localhost:3000`
 
 ### 3. Access the Applications
 
-**For Staff (POS Terminal):**
+**For Staff (Hospital Billing Terminal):**
 - Open `http://localhost:3000` on your laptop
-- Browse pharmacy products, add to cart, generate QR codes
+- Browse hospital services, add to patient bill, generate QR codes
 
 **For Mobile Display:**
-- Open `http://192.168.100.221:5001/display` on mobile browser
+- Open `http://192.168.x.x:5001/display` on mobile browser (use IP shown by Flask server)
 - QR codes will appear automatically when generated
 
 ### 4. Complete Workflow
